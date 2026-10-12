@@ -40,9 +40,40 @@ from __future__ import annotations
 from pathlib import Path
 
 
+import hashlib
+import json
+
+
+def _hash(entry: dict) -> str:
+    payload = {key: value for key, value in entry.items() if key != "hash"}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    previous = "0" * 64
+    if path.exists() and path.stat().st_size:
+        if not verify(path):
+            raise ValueError("Refusing to append to an invalid ledger")
+        previous = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["hash"]
+    row = dict(entry, prev_hash=previous)
+    row["hash"] = _hash(row)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return row
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    previous = "0" * 64
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if not isinstance(row, dict) or not isinstance(row.get("reason"), str) or not row["reason"].strip():
+                return False
+            if row.get("prev_hash") != previous or row.get("hash") != _hash(row):
+                return False
+            previous = row["hash"]
+    except (OSError, ValueError, TypeError):
+        return False
+    return True

@@ -51,5 +51,39 @@ class PolicyContext:
     expires_at: str = ""
 
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+
+
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    if context.data_classification not in {"public", "internal", "restricted"}:
+        return False, "Unknown data classification"
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "Restricted data cannot cross an egress boundary"
+    if not context.agent_owner or context.delegation_depth < 0:
+        return False, "Invalid agent identity or delegation depth"
+    try:
+        expires = datetime.fromisoformat(context.expires_at.replace("Z", "+00:00"))
+        if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
+            return False, "Missing timezone or expired run"
+    except (ValueError, TypeError):
+        return False, "Invalid or missing run expiry"
+    try:
+        principal = json.loads(PRINCIPALS_FILE.read_text(encoding="utf-8")).get(context.principal_id)
+    except (OSError, ValueError):
+        return False, "Trusted principal registry unavailable"
+    if not principal:
+        return False, "Unknown simulated principal"
+    if context.request_purpose not in principal["purposes"]:
+        return False, "Purpose not authorized for principal"
+    effective = set(principal["allowed_tools"]) & set(context.agent_scopes)
+    if context.delegation_depth > 0:
+        effective &= set(context.parent_scopes)
+    if context.requested_tool not in effective:
+        return False, "Tool outside principal, agent or parent scopes"
+    if context.requested_tool == "http_post" and not context.egress_enabled:
+        return False, "Network disabled for this run"
+    return True, "Principal, purpose, effective scopes and TTL authorize tool"

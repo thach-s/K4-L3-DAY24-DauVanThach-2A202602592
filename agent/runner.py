@@ -69,6 +69,97 @@ class RunnerScaffoldPending(NotImplementedError):
     """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
 
 
+import hashlib
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+from agent import ledger, pii, policy, tools
+
+# No document text, attacker customer ID or attacker URL is accepted by Run B.
+_TICKET_FILE = re.compile(r"ticket-(\d+)(?:b)?\.md")
+_SINK_URL = "http://127.0.0.1:10024/reconcile"
+
+
+class ToolBoundary:
+    def __init__(self, principal_id, run_name, scopes, ledger_path):
+        self.principal_id = principal_id
+        self.agent_id = "lab24-agent/" + run_name
+        self.run_id = str(uuid4())
+        self.expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        self.scopes = scopes
+        self.ledger_path = ledger_path
+
+    def authorize(self, tool, args, classification, purpose, egress=False):
+        context = policy.PolicyContext(
+            data_classification=classification, request_purpose=purpose,
+            agent_owner=self.agent_id, delegation_depth=0, egress_enabled=egress,
+            principal_id=self.principal_id, requested_tool=tool,
+            agent_scopes=self.scopes, parent_scopes=(), expires_at=self.expires_at,
+        )
+        allowed, reason = policy.check(context)
+        ledger.append({
+            "ts": datetime.now(timezone.utc).isoformat(), "agent_id": self.agent_id,
+            "run_id": self.run_id, "on_behalf_of": self.principal_id,
+            "expires_at": self.expires_at, "tool": tool,
+            "args_hash": hashlib.sha256(json.dumps(args, sort_keys=True).encode()).hexdigest(),
+            "classification": classification, "decision": "allow" if allowed else "deny",
+            "reason": reason,
+        }, self.ledger_path)
+        return allowed
+
+
+def _run_a(message, llm, boundary) -> tuple[list[int], str]:
+    if not boundary.authorize("search_docs", {"query": message}, "internal", "summarize-tickets"):
+        return [], "Yêu cầu bị từ chối theo quyền principal mô phỏng."
+    docs = tools.search_docs(message)
+    # Inspect attacks locally; their fields are never used to select private data.
+    llm.find_injection("\n\n".join(doc["text"] for doc in docs))
+    safe_docs = [{"id": doc["id"], "text": pii.redact(doc["text"])} for doc in docs]
+    ids = sorted({int(match.group(1)) for doc in safe_docs
+                  if (match := _TICKET_FILE.fullmatch(doc["id"]))})
+    # Redact output too. Only this user-facing summary and typed IDs leave A.
+    return ids, pii.redact(llm.summarize(safe_docs))
+
+
+def _run_b(ticket_ids: list[int], boundary) -> None:
+    if not ticket_ids:
+        return
+    if any(type(ticket) is not int or ticket <= 0 for ticket in ticket_ids):
+        raise ValueError("Run B accepts positive integer ticket IDs only")
+    # Check OBO BEFORE even opening the private fixture for metadata mapping.
+    context = policy.PolicyContext(
+        "restricted", "support-reply", boundary.agent_id, 0, False,
+        boundary.principal_id, "read_customer", boundary.scopes, (), boundary.expires_at,
+    )
+    authorized, _ = policy.check(context)
+    if not authorized:
+        boundary.authorize("read_customer", {"ticket_ids": ticket_ids}, "restricted", "support-reply")
+        return
+    selected = set(ticket_ids)
+    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    # Trusted metadata is the sole source of customer IDs.
+    customer_ids = sorted({row["customer_id"] for row in customers
+                           if selected.intersection(row.get("related_tickets", []))})
+    del customers
+    records = []
+    for customer_id in customer_ids:
+        if boundary.authorize("read_customer", {"customer_id": customer_id}, "restricted", "support-reply"):
+            records.append(tools.read_customer(customer_id))
+    # A fixed local reconciliation proposal demonstrates the PEP independently
+    # of injection recognition. B never receives an attacker-selected endpoint.
+    if records:
+        args = {"url": _SINK_URL, "body": {"records": records}}
+        if boundary.authorize("http_post", args, "restricted", "support-reply", egress=True):
+            tools.http_post(args["url"], args["body"])
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    ledger_path = Path(log_dir or REPORTS_DIR) / "ledger.jsonl"
+    a = ToolBoundary(principal_id, "run-a", ("search_docs",), ledger_path)
+    b = ToolBoundary(principal_id, "run-b", ("read_customer", "http_post"), ledger_path)
+    ticket_ids, summary = _run_a(message, llm, a)
+    _run_b(ticket_ids, b)
+    return summary

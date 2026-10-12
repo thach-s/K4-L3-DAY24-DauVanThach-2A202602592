@@ -31,9 +31,29 @@ set ở tests/vn_pii_testset.jsonl):
 from __future__ import annotations
 
 
+import re
+
+# Labelled bank accounts take precedence over ambiguous 10/12-digit numbers.
+_PATTERNS = (
+    ("VN_BANK_ACCOUNT", re.compile(r"(?:STK|số tài khoản|so tai khoan|bank_account)\s*[:=]?\s*[\"']?(?P<value>\d{8,16})(?!\d)", re.I)),
+    ("EMAIL", re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")),
+    ("VN_CCCD", re.compile(r"(?<!\d)\d{12}(?!\d)")),
+    ("VN_PHONE", re.compile(r"(?<!\d)0(?:[ -]?\d){9,10}(?![ -]?\d)")),
+)
+
+
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    entities = []
+    for kind, pattern in _PATTERNS:
+        for match in pattern.finditer(text):
+            start, end = match.span("value" if kind == "VN_BANK_ACCOUNT" else 0)
+            if any(start < e["end"] and e["start"] < end for e in entities):
+                continue
+            entities.append({"type": kind, "start": start, "end": end})
+    return sorted(entities, key=lambda e: e["start"])
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    for entity in reversed(detect(text)):
+        text = text[:entity["start"]] + "[REDACTED_" + entity["type"] + "]" + text[entity["end"]:]
+    return text

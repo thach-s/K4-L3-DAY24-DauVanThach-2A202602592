@@ -1,6 +1,8 @@
-# DPIA-lite — điền trong checkpoint 5
+# DPIA-lite — phạm vi lab synthetic
 
-1. Loại dữ liệu và phân loại:
-2. Mục đích xử lý và principal:
-3. Dữ liệu đi qua những run/tool nào, endpoint nào:
-4. Bằng chứng deny/allow và giới hạn của mock:
+1. **Dữ liệu và phân loại:** corpus chứa ticket untrusted, tên và PII tổng hợp; private fixture có customer ID, tên, CCCD, phone, STK, email và related_tickets. Các record khách được coi là restricted; dữ liệu search là internal nhưng vẫn có PII nên redact trước summary/boundary. Bộ regex chỉ nhận bốn loại PII, không phát hiện tên người hoặc mọi cách obfuscation.
+2. **Mục đích và principal:** Run A summarize-tickets; Run B support-reply. support_l1 chỉ search_docs; dpo có quyền read_customer theo fixture. Giao quyền principal/scopes/parent_scopes, purpose và TTL 5 phút được kiểm trước tool. `--as` chọn identity mô phỏng, không xác thực danh tính production. Hai run gọi trực tiếp (depth 0); test policy kiểm depth >0 không vượt quyền cha.
+3. **Luồng và nơi đến:** user → A/search_docs → redact → summary trả user; A chỉ chuyển list[int] lấy từ tên file sang B. B kiểm OBO trước khi mở customers.json, map trusted related_tickets rồi check từng read_customer. Raw text, customer ID và URL trong lure không sang B. B giữ record trong bộ nhớ; proposal POST tới endpoint cố định 127.0.0.1:10024 bị deny restricted+egress. Allowlist của tools giữ nguyên. Ledger chỉ lưu hash args, identity/TTL/decision/reason, không chứa record PII thô.
+4. **Rủi ro và bằng chứng:** baseline exfil trong attack-before.log; bốn biến thể bị chặn dưới hai principal; attack-after.log 0 byte; ledger verify True, sửa một dòng giữa chuỗi trả False (replay.log). PII precision/recall 1.000 chỉ trên 120 dòng synthetic của đề, không suy rộng production. Tên file và related_tickets là nguồn tin cậy theo threat model; nếu attacker có quyền sửa cả mapping, kiến trúc này chưa đủ.
+5. **Giới hạn và vòng đời:** hai run là các hàm/context có scope riêng trong cùng process, không có OS/container isolation. JSON fixture mở toàn file khi map sau OBO; production cần index metadata riêng và kho dữ liệu có row-level authorization. Không có retention/deletion cascade, encryption at rest, identity provider, kiểm soát log đồng thời hay trusted ledger anchor. Hash chain không phát hiện cắt đuôi/viết lại toàn chuỗi. Log before có PII synthetic theo yêu cầu đề; không tái sử dụng với dữ liệu thật. Nếu dùng model thật cần đánh giá endpoint/nhà cung cấp lại; bài này chỉ mock, không gửi dữ liệu tới model API.
+6. **Pháp lý:** mapping nguồn chính thức trong compliance-mapping.md; đây là đánh giá kỹ thuật rút gọn phục vụ lab, không phải hồ sơ đánh giá tác động pháp lý hoàn chỉnh. Chưa xác minh điều khoản cụ thể, không kết luận tuân thủ pháp luật.
